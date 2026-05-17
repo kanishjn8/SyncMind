@@ -6,7 +6,7 @@ educational topics using an embedding-based knowledge base, and recommends
 **courses, repositories, videos, and jobs** tailored to the user's interests
 and location.
 
-> Final-year project — built with React, FastAPI, MySQL, Sentence-Transformers,
+> Built with React, FastAPI, MySQL, Sentence-Transformers,
 > KeyBERT, SerpApi (Google Jobs), and a Manifest V3 Chrome extension.
 
 ---
