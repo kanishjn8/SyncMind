@@ -1,36 +1,74 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# SyncMind Frontend
 
-## Getting Started
+React 18 single-page app built with **Create React App** (not Next.js — there's
+a leftover `next.config.ts` in this folder, but `package.json` uses
+`react-scripts`).
 
-First, run the development server:
+For the full project overview, architecture, and backend setup, see the
+[root README](../README.md).
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+## Stack
+
+- React 18 + React Router DOM 6
+- Tailwind CSS
+- Framer Motion (animations)
+- Lucide React (icons)
+- Recharts (charts)
+
+## Layout
+
+```
+src/
+├── App.jsx                ← Router, global AppContext, desktop-only guard
+├── index.jsx              ← React entry
+├── index.css              ← Tailwind base styles
+├── pages/
+│   ├── Landing.jsx        ← OAuth + platform connect flows (incl. extension bridge)
+│   ├── Dashboard.jsx      ← Connected platforms, recs, jobs section
+│   └── About.jsx
+└── components/
+    ├── Navbar.jsx
+    ├── Header.jsx
+    ├── PlatformCard.jsx
+    ├── ConnectedPlatformCard.jsx
+    ├── RecommendationCard.jsx   ← cards for repos, videos, courses, jobs
+    ├── ProgressRing.jsx
+    ├── FeatureCard.jsx
+    ├── GlowButton.jsx
+    ├── StarField.jsx
+    └── ParticleBackground.jsx
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+A separate, **optional** Chrome extension lives at
+[`extension/`](./extension/README.md) — it powers the Coursera connect flow
+when installed but the app works without it.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Develop
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```bash
+npm install
+npm start
+```
 
-## Learn More
+The app runs at `http://localhost:3000` and expects the FastAPI backend at
+`http://127.0.0.1:8000` (matches the OAuth callback URLs).
 
-To learn more about Next.js, take a look at the following resources:
+## Build
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```bash
+npm run build
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+Outputs a static bundle to `build/` that can be served by any static host or
+proxied behind the FastAPI app.
 
-## Deploy on Vercel
+## Notes
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- The app shows a desktop-only prompt below 1024px width (see `App.jsx`).
+- `Dashboard.jsx` triggers the **jobs** flow on mount:
+  1. fetches `https://ipapi.co/json/` for IP-based location,
+  2. `POST`s it to the backend `/profile/location`, then
+  3. `GET`s `/get_jobs` to render the "Jobs For You" section.
+- The Coursera connect button on `Landing.jsx` first pings for the extension
+  (`EXTENSION_PRESENT`). If silent, it just calls `/recommend-coursera` with
+  an empty history and lets the backend fall back to cross-platform inference.

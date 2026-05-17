@@ -1,60 +1,47 @@
-import joblib
+"""Educational-topic classifier (semantic).
+
+This module used to be a TF-IDF + Random Forest model with hard-coded
+escape hatches for common terms (``ai``, ``neural network``,
+``engineering``). It's now a thin wrapper around the embedding-based
+knowledge base in :mod:`app.knowledge_base`.
+
+The legacy ``random_forest_model2.pkl`` / ``vectorizer2.pkl`` files are
+no longer loaded, which silences the ``InconsistentVersionWarning``
+chatter at startup and lets us drop the hard-coded biases entirely:
+synonyms like "AI", "artificial intelligence", or "neural networks" all
+match anchors in the knowledge base via cosine similarity.
+
+The public ``classify_sentence`` API is preserved so existing callers
+in ``main.py`` keep working.
+"""
+
 import re
-import os
 
-# Define paths for loading the saved model and vectorizer
-# Ensure these files ('random_forest_model2.pkl', 'vectorizer2.pkl')
-# are in the same directory as this script when you run it.
-model_path = 'random_forest_model2.pkl'
-vectorizer_path = 'vectorizer2.pkl'
+from app.knowledge_base import get_knowledge_base
 
-# Text preprocessing function (must be identical to the one used during training)
-def clean_text(text):
-    
-    text = str(text).lower() # Ensure text is a string
-    text = re.sub(r'[^a-z\s]', '', text)
+
+def clean_text(text: str) -> str:
+    """Lowercase and strip punctuation while preserving digits.
+
+    Digits matter for terms like ``c++`` (becomes ``c``), ``html5``,
+    ``web3`` etc. The previous version stripped digits, which made
+    those terms harder to match.
+    """
+    text = str(text).lower()
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
     return text
 
-# ------------------- #
-# Inference Function
-# ------------------- #
-def classify_sentence(input_sentence):
+
+def classify_sentence(input_sentence: str) -> int:
+    """Return ``1`` if ``input_sentence`` looks educational, else ``0``.
+
+    The decision is made by cosine similarity against a curated knowledge
+    base of educational concept anchors. Unlike the previous classifier,
+    this works equally well for short single-word inputs and multi-word
+    phrases — there is no need to split a phrase before calling.
     """
-    Classifies an input sentence as 'Educational' (1) or 'Non-Educational' (0)
-    using the trained model and vectorizer.
-    Includes a specific bias to classify 'ai' as Educational.
-    """
-    # Load the trained vectorizer and model
-    try:
-        vectorizer_loaded = joblib.load(vectorizer_path)
-        model_loaded = joblib.load(model_path)
-    except FileNotFoundError:
-        print("\nError: Model or vectorizer files not found for inference.")
-        print(f"Please ensure '{model_path}' and '{vectorizer_path}' are in the same directory as this script.")
-        return
-
-    # Clean the input sentence using the same preprocessing function
-    clean_input = clean_text(input_sentence)
-
-    # --- Bias for 'ai' term ---
-    # If the cleaned input is exactly "ai", force the prediction to Educational.
-    if clean_input == "ai":
-        return 1
-    if clean_input == "neural network":
-        return 1
-    if clean_input == "engineering":
-        return 1
-    # --- End Bias for 'ai' term ---
-    
-    # Transform the cleaned input sentence into TF-IDF features
-    input_vectorized = vectorizer_loaded.transform([clean_input])
-    
-    # Predict probabilities for each class
-    probabilities = model_loaded.predict_proba(input_vectorized)[0]
-    
-    # Make a final prediction based on a 0.5 probability threshold for class 1 (Educational)
-    prediction = 1 if probabilities[1] > 0.5 else 0
-    return prediction
-
-
-print(classify_sentence("data science"))
+    cleaned = clean_text(input_sentence)
+    if not cleaned:
+        return 0
+    return 1 if get_knowledge_base().is_educational(cleaned) else 0

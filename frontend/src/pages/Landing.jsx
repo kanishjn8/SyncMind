@@ -263,98 +263,214 @@ const handleConnectPlatform = (platform) => {
       handleGoogleSignIn(); // OAuth flow
       break;
     case "coursera": {
+      console.log("[Coursera Connect] Starting connect flow", {
+        hasUserEmail: Boolean(user?.email),
+        isAuthenticated,
+      });
+
+      if (!user?.email) {
+        console.warn("[Coursera Connect] No user email; aborting.");
+        return;
+      }
+
       setIsCourseraDataLoading(true);
-      
-      // Update session storage with loading state
       const currentConnections = loadConnectionState();
       saveConnectionState({
         ...currentConnections,
-        isCourseraDataLoading: true
+        isCourseraDataLoading: true,
       });
 
-      window.open("https://www.coursera.org", "_blank");
-      alert("We opened Coursera in a new tab. Please wait while we fetch your course data.");
+      const stopCourseraLoading = (reason) => {
+        console.log("[Coursera Connect] Stopping loading state", { reason });
+        setIsCourseraDataLoading(false);
+        const latestConnections = loadConnectionState();
+        saveConnectionState({
+          ...latestConnections,
+          isCourseraDataLoading: false,
+        });
+      };
 
-      const handleMessage = async (event) => {
-        if (event.data?.source === "coursera_extractor") {
+      // Hit /recommend-coursera with a (possibly empty) history. The
+      // backend has a cross-platform fallback that derives keywords
+      // from GitHub + YouTube activity when the scraper found nothing,
+      // so this call works whether or not the extension is installed.
+      const requestRecommendations = async (courses, extractorMeta) => {
+        try {
+          setIsCourseraConnected(true);
+          setPlatformData((prev) => {
+            const newData = {
+              ...prev,
+              coursera: { courses, ...extractorMeta },
+            };
+            const conns = loadConnectionState();
+            saveConnectionState({
+              ...conns,
+              coursera: true,
+              platformData: newData,
+            });
+            return newData;
+          });
 
-          try {
-            setIsCourseraConnected(true);
+          const historyItems = (courses || []).map((course) => {
+            const parts = [course.title, course.context].filter(Boolean);
+            return parts.length ? parts.join(" — ") : course.url;
+          });
+
+          console.log("[Coursera Connect] Calling /recommend-coursera", {
+            email: user.email,
+            courseCount: courses?.length || 0,
+            via: extractorMeta.via,
+          });
+
+          const res = await fetch(
+            `http://localhost:8000/recommend-coursera?email=${encodeURIComponent(user.email)}`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ history: historyItems }),
+              credentials: "include",
+            }
+          );
+          const body = await res.json();
+          console.log("[Coursera Connect] Recommendation response", res.status, body);
+
+          if (res.ok) {
             setPlatformData((prev) => {
               const newData = {
                 ...prev,
-                coursera: event.data.payload,
+                coursera: { ...prev.coursera, recommendations: body },
               };
-              
-              const currentConnections = loadConnectionState();
+              const conns = loadConnectionState();
               saveConnectionState({
-                ...currentConnections,
-                coursera: true,
-                platformData: newData
+                ...conns,
+                platformData: newData,
+                isCourseraDataLoading: false,
               });
-              
               return newData;
             });
-
-            if (user?.email && event.data.payload?.courses?.length > 0) {
-              console.log("Calling recommendation API for Coursera...");
-              
-              const courseUrls = event.data.payload.courses.map(course => course.url);
-              console.log(courseUrls)
-              const recommendResponse = await fetch(`http://localhost:8000/recommend-coursera?email=${user.email}`, {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                  history: courseUrls
-                }),
-                credentials: 'include'
-              });
-              if (recommendResponse.ok) {
-                const recommendations = await recommendResponse.json();
-                
-                
-                setPlatformData((prev) => {
-                  const newData = {
-                    ...prev,
-                    coursera: {
-                      ...prev.coursera,
-                      recommendations: recommendations
-                    }
-                  };
-                  
-                  const currentConnections = loadConnectionState();
-                  saveConnectionState({
-                    ...currentConnections,
-                    platformData: newData,
-                    isCourseraDataLoading: false
-                  });
-                  
-                  return newData;
-                });
-              } else {
-                console.error("Failed to get Coursera recommendations");
-              }
-            }
-
-          } catch (error) {
-            console.error("Error processing Coursera data:", error);
-          } finally {
-            setIsCourseraDataLoading(false);
-            
-            const currentConnections = loadConnectionState();
-            saveConnectionState({
-              ...currentConnections,
-              isCourseraDataLoading: false
-            });
+          } else {
+            console.error("[Coursera Connect] Recommendation API failed", body);
           }
-
-          window.removeEventListener("message", handleMessage);
+        } catch (err) {
+          console.error("[Coursera Connect] requestRecommendations error:", err);
+        } finally {
+          stopCourseraLoading("recommendations-done");
         }
       };
 
-      window.addEventListener("message", handleMessage);
+      // ----- Extension presence detection -----------------------------
+      // The landing-bridge content script announces itself with an
+      // EXTENSION_PRESENT message as soon as it loads, and again on
+      // demand when we PING. If we don't hear back in ~700ms we assume
+      // there's no extension and use the no-extension path.
+
+      let extensionPresent = false;
+      let resolvedPath = false;
+      const presenceListener = (event) => {
+        if (
+          event.data?.source === "coursera_extractor" &&
+          event.data?.type === "EXTENSION_PRESENT"
+        ) {
+          extensionPresent = true;
+          console.log("[Coursera Connect] Extension detected", {
+            version: event.data?.version,
+          });
+        }
+      };
+      window.addEventListener("message", presenceListener);
+      // Ask any installed landing-bridge content script to re-announce.
+      window.postMessage(
+        { source: "coursera_extractor_app", type: "PING" },
+        "*"
+      );
+
+      const EXTENSION_PROBE_MS = 700;
+
+      const proceedWithoutExtension = async () => {
+        if (resolvedPath) return;
+        resolvedPath = true;
+        window.removeEventListener("message", presenceListener);
+        console.log(
+          "[Coursera Connect] No extension detected — using cross-platform fallback."
+        );
+        await requestRecommendations([], {
+          via: "no-extension-fallback",
+          page: null,
+        });
+      };
+
+      const proceedWithExtension = () => {
+        if (resolvedPath) return;
+        resolvedPath = true;
+        window.removeEventListener("message", presenceListener);
+
+        const courseraWindow = window.open(
+          "https://www.coursera.org/my-learning",
+          "_blank"
+        );
+        if (!courseraWindow) {
+          console.error("[Coursera Connect] Popup blocked.");
+          stopCourseraLoading("popup-blocked");
+          return;
+        }
+
+        alert(
+          "We opened your Coursera 'My Learning' page in a new tab.\n\n" +
+            "If you're not signed into Coursera in this browser, sign in there first — we'll pick up your courses automatically once they load."
+        );
+
+        let didReceiveExtractorMessage = false;
+        const handleExtracted = async (event) => {
+          if (
+            event.data?.source !== "coursera_extractor" ||
+            event.data?.type !== "EXTRACTED"
+          ) {
+            return;
+          }
+
+          const payload = event.data?.payload || {};
+          if (payload.needsLogin) {
+            console.warn(
+              "[Coursera Connect] Extension reports login required; waiting for sign-in."
+            );
+            return;
+          }
+
+          didReceiveExtractorMessage = true;
+          clearTimeout(extractorTimeoutId);
+          window.removeEventListener("message", handleExtracted);
+
+          await requestRecommendations(payload.courses || [], {
+            via: "extension",
+            page: payload.page || null,
+            readyReason: payload.readyReason,
+            sources: payload.sources,
+          });
+        };
+
+        const extractorTimeoutId = setTimeout(async () => {
+          if (didReceiveExtractorMessage) return;
+          console.warn(
+            "[Coursera Connect] Extension didn't deliver in time — falling back."
+          );
+          window.removeEventListener("message", handleExtracted);
+          await requestRecommendations([], {
+            via: "extension-timeout-fallback",
+            page: null,
+          });
+        }, 60000);
+
+        window.addEventListener("message", handleExtracted);
+      };
+
+      setTimeout(() => {
+        if (extensionPresent) {
+          proceedWithExtension();
+        } else {
+          proceedWithoutExtension();
+        }
+      }, EXTENSION_PROBE_MS);
+
       break;
     }
   }
@@ -689,7 +805,7 @@ const features = [
                   stiffness: 100,
                 }}
               >
-                {platform.isConnected ? (
+                {(platform.isConnected || platform.isLoading) ? (
                   <ConnectedPlatformCard {...platform} />
                 ) : (
                   <PlatformCard {...platform} onConnect={() => handleConnectPlatform(platform.platform)} />

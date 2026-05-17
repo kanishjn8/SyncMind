@@ -74,16 +74,24 @@ def save_tokens_yt(email, access_token, refresh_token, expires_in, platform):
     db.close()
     print("Tokens saved")
 
-def save_user_if_not_exists(email, name):
+def save_user_if_not_exists(email, name, locale: str | None = None):
     conn = get_db()
     cursor = conn.cursor()
 
-    # Insert only if email doesn't exist
-    cursor.execute("""
-        INSERT INTO users (email, name)
-        VALUES (%s, %s)
-        ON DUPLICATE KEY UPDATE name = VALUES(name)
-    """, (email, name))
+    # Insert (or update) the user record, including the Google-provided
+    # locale ("en-US", "en-IN", …). The locale is used as a fallback
+    # signal for downstream features like job recommendations when the
+    # frontend hasn't reported a richer location yet.
+    cursor.execute(
+        """
+        INSERT INTO users (email, name, locale)
+        VALUES (%s, %s, %s)
+        ON DUPLICATE KEY UPDATE
+            name = VALUES(name),
+            locale = COALESCE(VALUES(locale), users.locale)
+        """,
+        (email, name, locale),
+    )
 
     conn.commit()
     cursor.close()
@@ -122,9 +130,10 @@ def google_callback(request: Request):
 
     email = userinfo.get("email")
     name = userinfo.get("name", "Unknown User")
-    
+    locale = userinfo.get("locale")
+
     save_tokens_yt(email, access_token, refresh_token, expires_in, platform="google")
-    save_user_if_not_exists(email, name)
+    save_user_if_not_exists(email, name, locale=locale)
 
     # Generate a temporary token
     import uuid
@@ -164,13 +173,13 @@ def claim_session(auth_token: str, request: Request):
         return {"success": False, "error": "Invalid or expired token"}
 @router.get("/github")
 def github_login():
-    github_auth_url = (
-        "https://github.com/login/oauth/authorize"
-        f"?client_id={GIT_CLIENT_ID}"
-        "&scope=read:user user:email"
-        f"&redirect_uri={GITHUB_REDIRECT_URI}"
-    )
-    return {"url":github_auth_url}
+    params = {
+        "client_id": GIT_CLIENT_ID,
+        "scope": "read:user user:email",
+        "redirect_uri": GITHUB_REDIRECT_URI,
+    }
+    github_auth_url = f"https://github.com/login/oauth/authorize?{urlencode(params)}"
+    return {"url": github_auth_url}
 
 def store_github_token(email: str, access_token: str):
     conn = get_db()
@@ -220,7 +229,16 @@ def github_callback(code: str, request: Request):
         headers={"Authorization": f"Bearer {access_token}"}
     )
     emails = email_res.json()
-    primary_email = next((e['email'] for e in emails if e['primary']), None)
+    primary_email = None
+    if isinstance(emails, list):
+        primary_email = next((e.get("email") for e in emails if e.get("primary")), None)
+        if not primary_email:
+            primary_email = next((e.get("email") for e in emails if e.get("verified")), None)
+        if not primary_email and emails:
+            primary_email = emails[0].get("email")
+
+    if not primary_email:
+        return {"error": "GitHub account email not available. Ensure your email is visible/verified on GitHub."}
 
     store_github_token(email=primary_email, access_token=access_token)
 

@@ -6,7 +6,9 @@ def embed_text(text: str):
     if isinstance(text, str):
         text = [text]
 
-    return model.encode(text, convert_to_tensor=True)#When convert_to_tensor is set to True, it instructs the encode method to return the generated embeddings as a tensor (a multi-dimensional array, similar to NumPy arrays but optimized for deep learning operations on GPUs).
+    # Return NumPy arrays so sklearn cosine_similarity works on any device,
+    # including Apple Silicon MPS where Torch tensors are not NumPy-convertible directly.
+    return model.encode(text, convert_to_numpy=True)
 
 
 

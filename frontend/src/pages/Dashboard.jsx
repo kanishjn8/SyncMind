@@ -1,6 +1,6 @@
 "use client"
 import { motion } from "framer-motion"
-import { Github, Youtube, BookOpen, RefreshCw, X } from "lucide-react"
+import { Github, Youtube, BookOpen, RefreshCw, X, Briefcase } from "lucide-react"
 import RecommendationCard from "../components/RecommendationCard"
 import GlowButton from "../components/GlowButton"
 import ProgressRing from "../components/ProgressRing"
@@ -31,11 +31,15 @@ const [recommendations, setRecommendations] = useState({
     github: [],
     youtube: [],
     coursera: [],
+    jobs: [],
   });
 
 // Add loading and error states for debugging
 const [loading, setLoading] = useState(true);
 const [error, setError] = useState(null);
+const [jobsLoading, setJobsLoading] = useState(false);
+const [jobsError, setJobsError] = useState(null);
+const [userLocation, setUserLocation] = useState(null);
 
 // New states for preferences modal
 const [showPreferencesModal, setShowPreferencesModal] = useState(false);
@@ -156,11 +160,16 @@ const [customLoading, setCustomLoading] = useState(false);
             level: extractLevel(course.info || ""),
             url: course.url,
             info: course.info
-          })) : []
+          })) : [],
+          jobs: [],
         };
 
         console.log("Processed recommendations:", processedRecommendations);
-        setRecommendations(processedRecommendations);
+        setRecommendations((prev) => ({
+          ...processedRecommendations,
+          // Preserve any jobs already fetched by the parallel jobs effect.
+          jobs: prev.jobs?.length ? prev.jobs : processedRecommendations.jobs,
+        }));
         
       } catch (err) {
         console.error("Failed to fetch recommendations:", err);
@@ -172,6 +181,95 @@ const [customLoading, setCustomLoading] = useState(false);
 
     fetchRecommendations();
   }, [user]); // Changed dependency to entire user object
+
+// Fetch jobs in parallel with the main recommendations flow. We:
+//   1. Ask ipapi.co for the user's city/region/country (best-effort).
+//   2. POST that to the backend so it's persisted on the users row.
+//   3. Hit /get_jobs which queries SerpApi using the user's existing
+//      keyword history + the location we just stored.
+// All steps are wrapped so a failure in one doesn't kill the rest —
+// the backend falls back gracefully when location is missing.
+useEffect(() => {
+  const email = user?.email || user?.Email || user?.emailAddress;
+  if (!email) return;
+
+  let cancelled = false;
+
+  const fetchJobs = async () => {
+    try {
+      setJobsLoading(true);
+      setJobsError(null);
+
+      let locationDetails = null;
+      try {
+        const locRes = await fetch("https://ipapi.co/json/");
+        if (locRes.ok) {
+          const locJson = await locRes.json();
+          locationDetails = {
+            email,
+            city: locJson.city || null,
+            region: locJson.region || null,
+            country: locJson.country_name || null,
+            country_code: locJson.country_code || null,
+          };
+          setUserLocation(locationDetails);
+
+          // Best-effort persist; don't block on failure.
+          fetch("http://localhost:8000/profile/location", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(locationDetails),
+          }).catch((err) =>
+            console.warn("[Jobs] failed to persist location:", err)
+          );
+        }
+      } catch (err) {
+        console.warn("[Jobs] ipapi.co lookup failed:", err);
+      }
+
+      const jobsRes = await fetch(
+        `http://localhost:8000/get_jobs?email=${encodeURIComponent(email)}`
+      );
+      const jobsJson = await jobsRes.json();
+
+      if (cancelled) return;
+
+      if (jobsJson?.error) {
+        console.error("[Jobs] backend error:", jobsJson.error);
+        setJobsError(jobsJson.error);
+        return;
+      }
+
+      const jobs = Array.isArray(jobsJson?.jobs) ? jobsJson.jobs : [];
+      const mappedJobs = jobs.map((job, index) => ({
+        id: `job-${index}-${job.job_id || job.title}`,
+        title: job.title,
+        companyName: job.company_name,
+        location: job.location,
+        via: job.via,
+        description: job.description,
+        thumbnail: job.thumbnail,
+        scheduleType: job.schedule_type,
+        postedAt: job.posted_at,
+        url: job.apply_link || job.share_link,
+      }));
+
+      setRecommendations((prev) => ({ ...prev, jobs: mappedJobs }));
+    } catch (err) {
+      console.error("[Jobs] fetch failed:", err);
+      if (!cancelled) setJobsError(err.message);
+    } finally {
+      if (!cancelled) setJobsLoading(false);
+    }
+  };
+
+  fetchJobs();
+
+  return () => {
+    cancelled = true;
+  };
+}, [user]);
+
 
 const formatCount = (num) => {
   if (num === null || num === undefined) return "0";
@@ -659,6 +757,69 @@ const handlePreferencesSubmit = async () => {
                     transition={{ duration: 0.6, delay: index * 0.1 }}
                   >
                     <RecommendationCard type="coursera" data={course} />
+                  </motion.div>
+                ))}
+              </div>
+            )}
+          </motion.section>
+        )}
+
+        {/* Job Recommendations */}
+        {!loading && !customLoading && (
+          <motion.section
+            initial={{ opacity: 0, y: 30 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.6, delay: 0.55 }}
+            className="mb-12"
+          >
+            <div className="flex items-center justify-between mb-8">
+              <div className="flex items-center space-x-4">
+                <Briefcase className="w-8 h-8 text-emerald-400" />
+                <h2 className="text-3xl font-bold text-white">
+                  Jobs For You
+                </h2>
+                <span className="px-3 py-1 bg-emerald-500/20 text-emerald-300 rounded-full text-sm font-medium">
+                  {recommendations.jobs.length} items
+                </span>
+                {userLocation?.city && (
+                  <span className="px-3 py-1 bg-white/10 text-gray-300 rounded-full text-xs font-medium">
+                    {[userLocation.city, userLocation.region, userLocation.country]
+                      .filter(Boolean)
+                      .join(", ")}
+                  </span>
+                )}
+              </div>
+            </div>
+
+            {jobsLoading ? (
+              <div className="text-center py-8 text-gray-400">
+                <div className="inline-block animate-spin rounded-full h-6 w-6 border-b-2 border-emerald-400 mb-3"></div>
+                <p>Searching jobs nearby…</p>
+              </div>
+            ) : jobsError ? (
+              <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4">
+                <p className="text-red-300 text-sm">
+                  Couldn't load jobs: {jobsError}
+                </p>
+              </div>
+            ) : recommendations.jobs.length === 0 ? (
+              <div className="text-center py-8 text-gray-400">
+                <Briefcase className="w-12 h-12 mx-auto mb-4 opacity-50" />
+                <p>No job recommendations yet</p>
+                <p className="text-sm mt-2">
+                  Sync more activity so we can match jobs to your interests.
+                </p>
+              </div>
+            ) : (
+              <div className="grid lg:grid-cols-3 gap-6">
+                {recommendations.jobs.map((job, index) => (
+                  <motion.div
+                    key={job.id}
+                    initial={{ opacity: 0, x: -30 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    transition={{ duration: 0.6, delay: index * 0.1 }}
+                  >
+                    <RecommendationCard type="job" data={job} />
                   </motion.div>
                 ))}
               </div>
