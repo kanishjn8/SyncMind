@@ -24,3 +24,4 @@ __pycache__/
 # Ignore model artifacts (if any)
 *.pt
 *.h5
+app/rag_embeddings.npz

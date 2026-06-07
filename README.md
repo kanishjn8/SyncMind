@@ -2,7 +2,7 @@
 
 SyncMind is a full-stack, AI-assisted **learning insights** platform. It connects
 to a user's **GitHub**, **YouTube**, and **Coursera** activity, distills it into
-educational topics using an embedding-based knowledge base, and recommends
+educational topics using a RAG-backed knowledge base, and recommends
 **courses, repositories, videos, and jobs** tailored to the user's interests
 and location.
 
@@ -60,7 +60,7 @@ SyncMind helps a user understand and grow their own learning footprint:
         │                                                          │
         │  Auth (Google + GitHub OAuth)   Recommenders             │
         │  Sessions (itsdangerous)        ─ recommend-yt           │
-        │  Knowledge Base (MiniLM)        ─ recommend-git          │
+        │  RAG Keyword Filter (MiniLM)    ─ recommend-git          │
         │  KeyBERT keyword extraction     ─ recommend-coursera     │
         │  SerpApi (Google Jobs)          ─ get_jobs               │
         │  Idempotent migrations          ─ /profile/location      │
@@ -98,7 +98,7 @@ the user's GitHub + YouTube signals.
 **Backend**
 - FastAPI + Uvicorn
 - `itsdangerous` SessionMiddleware
-- `sentence-transformers` (`all-MiniLM-L6-v2`) — the educational knowledge base
+- `sentence-transformers` (`all-MiniLM-L6-v2`) — retrieval embeddings for the educational RAG filter
 - `KeyBERT` — keyphrase extraction
 - `Selenium` (headless Chrome) — Coursera fallback scraping when needed
 - `mysql-connector-python` — DB driver
@@ -122,13 +122,14 @@ SyncMind/
 │   ├── main.py                     ← FastAPI app, all endpoints
 │   ├── auth.py                     ← Google + GitHub OAuth
 │   ├── migrations.py               ← idempotent schema migrations (startup)
+│   ├── model.py                    ← RAG educational keyword filter
 │   ├── requirements.txt
 │   ├── .env.example
 │   ├── app/
-│   │   ├── knowledge_base.py       ← embedding KB (educational filter)
+│   │   ├── knowledge_base.py       ← compatibility wrapper → model.py
 │   │   └── vectorizer.py
 │   ├── utils/
-│   │   └── data_loader.py          ← classify_sentence wrapper → KB
+│   │   └── data_loader.py          ← classify_sentence wrapper → RAG
 │   └── db/
 │       └── init/001_schema.sql     ← initial schema (fresh Docker volume)
 └── frontend/
@@ -242,7 +243,11 @@ template. Summary:
 | `DATABASE_URL` | yes | SQLAlchemy-style URL (used by some helpers) |
 | `SESSION_SECRET_KEY` | yes | Signs the session cookie |
 | `SERPAPI_KEY` | yes | Google Jobs via SerpApi |
-| `KB_THRESHOLD` | optional | Cosine similarity threshold (default `0.45`) for the educational KB |
+| `RAG_KB_PATH` / `EDUCATIONAL_KB_PATH` | optional | Path to the educational RAG knowledge base (`.json`, `.jsonl`, `.csv`, `.txt`, `.md`). Defaults to `backend/app/educational_kb.jsonl` when present |
+| `RAG_SIMILARITY_THRESHOLD` | optional | Top retrieval score required for an educational keyword (default `0.45`) |
+| `RAG_TOP_K` | optional | Number of KB evidence documents retrieved per keyword (default `3`) |
+| `RAG_CACHE_PATH` | optional | Embedding cache path (default `backend/app/rag_embeddings.npz`) |
+| `KB_THRESHOLD` | optional | Deprecated fallback for `RAG_SIMILARITY_THRESHOLD` |
 
 > ⚠️ **Important**: GitHub is strict about the redirect URI — `localhost` and
 > `127.0.0.1` are **not** interchangeable. Whichever you put in your GitHub
@@ -252,23 +257,32 @@ template. Summary:
 
 ## How the Recommender Works
 
-### Educational Knowledge Base (replaces the old Random Forest)
+### Educational RAG Filter (replaces the old Random Forest)
 
 The original prototype used TF-IDF + a Random Forest classifier to decide
 whether a keyword was "educational." It was brittle, locked into a snapshot
 of scikit-learn, and produced an `InconsistentVersionWarning` at startup.
 
-It has been replaced with an **embedding-based knowledge base** in
-`backend/app/knowledge_base.py`:
+It has been replaced with a **RAG-based keyword filter** in
+`backend/model.py`:
 
-- A curated list of educational concepts (CS, ML, math, design, etc.) is
-  embedded once with **Sentence-Transformers `all-MiniLM-L6-v2`** and cached
-  to disk.
-- At runtime, any candidate phrase is embedded and scored against the KB
-  with cosine similarity.
-- `utils/data_loader.classify_sentence` is a thin wrapper that returns
-  `1` if `score >= KB_THRESHOLD` (default `0.45`), else `0` — so existing
-  call sites keep working.
+- The knowledge base is loaded from `RAG_KB_PATH` / `EDUCATIONAL_KB_PATH`, or
+  from `backend/app/educational_kb.jsonl` when that file exists.
+- Supported KB formats are JSON, JSONL, CSV, TXT, and Markdown. JSON/CSV rows
+  can use fields such as `title`, `topic`, `keywords`, `summary`,
+  `description`, `content`, `body`, or `text`.
+- KB entries should describe educational topics or domains; this is retrieved
+  evidence, not a mixed positive/negative classifier training set.
+- Each KB document is embedded once with **Sentence-Transformers
+  `all-MiniLM-L6-v2`** and cached to `RAG_CACHE_PATH`.
+- At runtime, each KeyBERT phrase retrieves its top KB evidence by cosine
+  similarity. The phrase is accepted when the top retrieval score is at least
+  `RAG_SIMILARITY_THRESHOLD` (default `0.45`).
+- `utils/data_loader.classify_sentence` is still the stable wrapper for
+  existing call sites, but it now delegates to the RAG filter.
+
+Until a project-specific KB is provided, `backend/model.py` uses a small
+built-in educational seed corpus so the app remains usable in development.
 
 ### Keyword extraction
 
@@ -426,9 +440,9 @@ The redirect URI in `backend/.env` must match the GitHub OAuth App
 **exactly** — including `127.0.0.1` vs `localhost`.
 
 **`InconsistentVersionWarning` from scikit-learn on startup**
-This was the old Random Forest model. It is no longer loaded; the knowledge
-base in `app/knowledge_base.py` replaces it. The `.pkl` files can be deleted
-if you want.
+This was the old Random Forest model. It is no longer loaded; the RAG filter
+in `backend/model.py` replaces it. Any old `.pkl` classifier/vectorizer files
+are obsolete.
 
 **No Coursera keywords extracted**
 Either install the extension and sign in to Coursera in that browser, or
